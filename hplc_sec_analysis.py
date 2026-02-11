@@ -17,7 +17,7 @@ import glob
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, peak_widths
-from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
+from dash import Dash, dcc, html, dash_table, Input, Output, callback
 import plotly.graph_objects as go
 
 # ── Color configuration ────────────────────────────────────────────────────
@@ -178,7 +178,7 @@ def detect_peaks(df, prominence=0.5, min_width=5, min_height=0.0):
 
 # ── Dash app ────────────────────────────────────────────────────────────────
 
-app = Dash(__name__, suppress_callback_exceptions=True)
+app = Dash(__name__)
 
 app.index_string = """<!DOCTYPE html>
 <html>
@@ -373,7 +373,7 @@ app.layout = html.Div(
         ),
 
         # ── Chromatogram plot ──────────────────────────────────────────
-        dcc.Graph(id="chromatogram", style={"marginTop": "20px"}, clear_on_unhover=True),
+        dcc.Graph(id="chromatogram", style={"marginTop": "20px"}),
 
         # ── Peak table ─────────────────────────────────────────────────
         html.H4("Detected Peaks", style={"marginTop": "16px", "color": "#FFFFFF", "fontSize": "1.4em"}),
@@ -540,8 +540,7 @@ def update_plot(sequence, sample, wavelength, prominence, min_width, min_height)
 
     # Shaded peak areas
     fill_r, fill_g, fill_b = hex_to_rgb(peak_hex)
-    fill_dim = f"rgba({fill_r},{fill_g},{fill_b},0.12)"
-    fill_bright = f"rgba({fill_r},{fill_g},{fill_b},0.38)"
+    fill_color = f"rgba({fill_r},{fill_g},{fill_b},0.18)"
     for p in peaks:
         li, ri = p["left_idx"], p["right_idx"] + 1
         seg_t = time[li:ri]
@@ -556,12 +555,11 @@ def update_plot(sequence, sample, wavelength, prominence, min_width, min_height)
             x=np.concatenate([seg_t, seg_t[::-1]]),
             y=np.concatenate([seg_r, np.zeros(len(seg_r))]),
             fill="toself",
-            fillcolor=fill_dim,
+            fillcolor=fill_color,
             line={"width": 0},
             showlegend=False,
             hoverinfo="text",
             hovertext=hover_txt,
-            meta={"peak_fill": True, "fill_dim": fill_dim, "fill_bright": fill_bright},
         ))
 
     # Peak markers
@@ -606,39 +604,6 @@ def update_plot(sequence, sample, wavelength, prominence, min_width, min_height)
         })
 
     return fig, table_data
-
-
-# ── Clientside callback: brighten peak area on hover ────────────────────────
-
-app.clientside_callback(
-    """
-    function(hoverData, figure) {
-        if (!figure || !figure.data) return window.dash_clientside.no_update;
-        // Don't interfere when hover clears (e.g. after figure update)
-        if (!hoverData) return window.dash_clientside.no_update;
-        var newFig = JSON.parse(JSON.stringify(figure));
-        var hoveredTrace = null;
-        if (hoverData.points && hoverData.points.length > 0) {
-            hoveredTrace = hoverData.points[0].curveNumber;
-        }
-        for (var i = 0; i < newFig.data.length; i++) {
-            var tr = newFig.data[i];
-            if (tr.meta && tr.meta.peak_fill) {
-                if (i === hoveredTrace) {
-                    tr.fillcolor = tr.meta.fill_bright;
-                } else {
-                    tr.fillcolor = tr.meta.fill_dim;
-                }
-            }
-        }
-        return newFig;
-    }
-    """,
-    Output("chromatogram", "figure", allow_duplicate=True),
-    Input("chromatogram", "hoverData"),
-    State("chromatogram", "figure"),
-    prevent_initial_call=True,
-)
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────

@@ -118,6 +118,8 @@ def list_samples(data_root, sequence):
 def load_sample(data_root, sequence, sample):
     """Load a single sample → dict[wavelength_label] = DataFrame(time, response)."""
     sample_path = os.path.join(data_root, sequence, sample)
+    if not os.path.isdir(sample_path):
+        return {}
     result = {}
     for csv_path in glob.glob(os.path.join(sample_path, "*.CSV")):
         basename = os.path.basename(csv_path)
@@ -612,9 +614,11 @@ app.clientside_callback(
     """
     function(hoverData, figure) {
         if (!figure || !figure.data) return window.dash_clientside.no_update;
+        // Don't interfere when hover clears (e.g. after figure update)
+        if (!hoverData) return window.dash_clientside.no_update;
         var newFig = JSON.parse(JSON.stringify(figure));
         var hoveredTrace = null;
-        if (hoverData && hoverData.points && hoverData.points.length > 0) {
+        if (hoverData.points && hoverData.points.length > 0) {
             hoveredTrace = hoverData.points[0].curveNumber;
         }
         for (var i = 0; i < newFig.data.length; i++) {

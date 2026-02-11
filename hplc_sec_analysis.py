@@ -20,6 +20,8 @@ from scipy.signal import find_peaks, peak_widths
 from dash import Dash, dcc, html, dash_table, Input, Output, callback
 import plotly.graph_objects as go
 
+VERSION = "0.3.0"
+
 # ── Color configuration ────────────────────────────────────────────────────
 
 WAVELENGTH_COLORS = {
@@ -288,8 +290,20 @@ app.layout = html.Div(
         "color": "#E0E0E0",
         "minHeight": "100vh",
         "fontSize": "20px",
+        "position": "relative",
     },
     children=[
+        html.Span(
+            f"v{VERSION}",
+            style={
+                "position": "absolute",
+                "top": "16px",
+                "right": "20px",
+                "color": "#555",
+                "fontSize": "14px",
+                "fontFamily": "monospace",
+            },
+        ),
         html.H2("HPLC-SEC Chromatogram Analysis", className="gradient-title"),
         html.P(f"Data root: {DATA_ROOT}", style={"color": "#888", "fontSize": "1em", "textAlign": "center"}),
 
@@ -612,4 +626,4 @@ if __name__ == "__main__":
     seqs = list_sequences(DATA_ROOT)
     print(f"Data root: {DATA_ROOT}")
     print(f"Found {len(seqs)} sequence(s): {', '.join(seqs) if seqs else '(none)'}")
-    app.run(debug=False, host="0.0.0.0", port=8050)
+    app.run(debug=True, host="0.0.0.0", port=8050)

@@ -20,7 +20,7 @@ from scipy.signal import find_peaks, peak_widths
 from dash import Dash, dcc, html, dash_table, Input, Output, callback
 import plotly.graph_objects as go
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 # ── Color configuration ────────────────────────────────────────────────────
 
@@ -149,7 +149,7 @@ def detect_peaks(df, prominence=0.5, min_width=5, min_height=0.0):
     widths_result = peak_widths(response, peaks, rel_height=1.0)
     left_ips = widths_result[2]
     right_ips = widths_result[3]
-    _trapz = getattr(np, "trapezoid", np.trapz)
+    _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
     peak_list = []
     for i, peak_idx in enumerate(peaks):

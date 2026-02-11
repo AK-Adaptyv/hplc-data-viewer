@@ -5,13 +5,18 @@ Usage:
     pip install dash plotly pandas numpy scipy
     python hplc_sec_analysis.py
     Open http://127.0.0.1:8050
+
+Set DATA_ROOT env var to override the default chromatogram directory.
+Default on Windows:  C:/CDSProjects/hplc_test_ak/csv_chromatograms
+Default elsewhere:   scans working directory for .rslt folders
 """
 
 import os
+import sys
 import glob
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks, peak_widths, peak_prominences
+from scipy.signal import find_peaks, peak_widths
 from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
 import plotly.graph_objects as go
 
@@ -22,6 +27,8 @@ WAVELENGTH_COLORS = {
     "280 nm": {"base": "#2724F2", "peak": "#3633FF"},
     "395 nm": {"base": "#42AEFC", "peak": "#76E6F5"},
 }
+
+ALL_WAVELENGTHS = ["220 nm", "280 nm", "395 nm"]
 
 
 def hex_to_rgb(h):
@@ -47,6 +54,26 @@ def compute_glow(time, peaks, sigma=0.08):
     return glow
 
 
+# ── Data root configuration ────────────────────────────────────────────────
+
+WINDOWS_DEFAULT = r"C:/CDSProjects/hplc_test_ak/csv_chromatograms"
+
+
+def resolve_data_root():
+    """Determine the root directory containing sequence folders."""
+    # 1. Explicit env var
+    env = os.environ.get("DATA_ROOT")
+    if env and os.path.isdir(env):
+        return env
+    # 2. Windows default
+    if sys.platform == "win32" and os.path.isdir(WINDOWS_DEFAULT):
+        return WINDOWS_DEFAULT
+    # 3. Fallback: current working directory
+    return os.getcwd()
+
+
+DATA_ROOT = resolve_data_root()
+
 # ── Data loading ────────────────────────────────────────────────────────────
 
 CHANNEL_MAP = {
@@ -55,75 +82,79 @@ CHANNEL_MAP = {
     "DAD1C": "395 nm",
 }
 
-def find_rslt_directory():
-    """Auto-discover the first .rslt directory in the working directory."""
-    for entry in os.listdir("."):
-        if entry.endswith(".rslt") and os.path.isdir(entry):
-            return entry
-    raise FileNotFoundError("No .rslt directory found in the working directory.")
+
+def _has_csv_samples(folder):
+    """Check if a folder contains at least one subdirectory with .CSV files."""
+    for sub in os.listdir(folder):
+        sub_path = os.path.join(folder, sub)
+        if os.path.isdir(sub_path) and glob.glob(os.path.join(sub_path, "*.CSV")):
+            return True
+    return False
 
 
-def load_all_data(rslt_dir):
-    """
-    Return nested dict  data[sample_name][wavelength_label] = DataFrame(time, response)
-    """
-    data = {}
-    for sample_name in sorted(os.listdir(rslt_dir)):
-        sample_path = os.path.join(rslt_dir, sample_name)
-        if not os.path.isdir(sample_path):
+def list_sequences(data_root):
+    """Return sorted list of sequence folder names inside data_root."""
+    seqs = []
+    for entry in sorted(os.listdir(data_root)):
+        if entry.startswith("."):
             continue
-        data[sample_name] = {}
-        for csv_path in glob.glob(os.path.join(sample_path, "*.CSV")):
-            basename = os.path.basename(csv_path)
-            for channel_key, wl_label in CHANNEL_MAP.items():
-                if channel_key in basename:
-                    df = pd.read_csv(csv_path, header=None, names=["time", "response"])
-                    data[sample_name][wl_label] = df
-                    break
-    return data
+        full = os.path.join(data_root, entry)
+        if os.path.isdir(full) and _has_csv_samples(full):
+            seqs.append(entry)
+    return seqs
+
+
+def list_samples(data_root, sequence):
+    """Return sorted list of sample folder names inside a sequence."""
+    seq_path = os.path.join(data_root, sequence)
+    if not os.path.isdir(seq_path):
+        return []
+    return sorted(
+        name for name in os.listdir(seq_path)
+        if os.path.isdir(os.path.join(seq_path, name))
+    )
+
+
+def load_sample(data_root, sequence, sample):
+    """Load a single sample → dict[wavelength_label] = DataFrame(time, response)."""
+    sample_path = os.path.join(data_root, sequence, sample)
+    result = {}
+    for csv_path in glob.glob(os.path.join(sample_path, "*.CSV")):
+        basename = os.path.basename(csv_path)
+        for channel_key, wl_label in CHANNEL_MAP.items():
+            if channel_key in basename:
+                df = pd.read_csv(csv_path, header=None, names=["time", "response"])
+                result[wl_label] = df
+                break
+    return result
 
 
 # ── Peak detection & integration ────────────────────────────────────────────
 
 def detect_peaks(df, prominence=0.5, min_width=5, min_height=0.0):
-    """
-    Detect peaks and compute area, %area, retention time, and estimated MW.
-
-    Returns a list of dicts, one per peak.
-    """
+    """Detect peaks and compute area, %area, retention time, and estimated MW."""
     response = df["response"].values
     time = df["time"].values
 
-    peaks, properties = find_peaks(
-        response,
-        prominence=prominence,
-        width=min_width,
-        height=min_height,
+    peaks, _ = find_peaks(
+        response, prominence=prominence, width=min_width, height=min_height,
     )
-
     if len(peaks) == 0:
         return []
 
-    # Compute peak widths at the base (rel_height=1 → full width at base)
     widths_result = peak_widths(response, peaks, rel_height=1.0)
-    # widths_result: (widths, width_heights, left_ips, right_ips)  — in sample indices
     left_ips = widths_result[2]
     right_ips = widths_result[3]
+    _trapz = getattr(np, "trapezoid", np.trapz)
 
     peak_list = []
     for i, peak_idx in enumerate(peaks):
-        li = int(np.floor(left_ips[i]))
-        ri = int(np.ceil(right_ips[i])) + 1
-        li = max(li, 0)
-        ri = min(ri, len(time))
+        li = max(int(np.floor(left_ips[i])), 0)
+        ri = min(int(np.ceil(right_ips[i])) + 1, len(time))
 
-        segment_time = time[li:ri]
-        segment_resp = response[li:ri]
-        _trapz = getattr(np, "trapezoid", np.trapz)  # numpy 2.0+ renamed trapz
-        area = float(_trapz(np.maximum(segment_resp, 0), segment_time))
-
+        area = float(_trapz(np.maximum(response[li:ri], 0), time[li:ri]))
         rt = float(time[peak_idx])
-        mw = 10 ** (-0.8316 * rt + 8.517)  # Daltons
+        mw = 10 ** (-0.8316 * rt + 8.517)
 
         peak_list.append({
             "peak_idx": int(peak_idx),
@@ -143,16 +174,9 @@ def detect_peaks(df, prominence=0.5, min_width=5, min_height=0.0):
     return peak_list
 
 
-# ── Load data at startup ────────────────────────────────────────────────────
-
-rslt_dir = find_rslt_directory()
-DATA = load_all_data(rslt_dir)
-SAMPLE_NAMES = list(DATA.keys())
-ALL_WAVELENGTHS = sorted({wl for s in DATA.values() for wl in s})
-
 # ── Dash app ────────────────────────────────────────────────────────────────
 
-app = Dash(__name__)
+app = Dash(__name__, suppress_callback_exceptions=True)
 
 app.index_string = """<!DOCTYPE html>
 <html>
@@ -250,6 +274,8 @@ app.index_string = """<!DOCTYPE html>
 </html>
 """
 
+INITIAL_SEQUENCES = list_sequences(DATA_ROOT)
+
 app.layout = html.Div(
     style={
         "fontFamily": "Arial, sans-serif",
@@ -263,28 +289,48 @@ app.layout = html.Div(
     },
     children=[
         html.H2("HPLC-SEC Chromatogram Analysis", className="gradient-title"),
-        html.P(f"Data: {rslt_dir}", style={"color": "#888", "fontSize": "1em", "textAlign": "center"}),
+        html.P(f"Data root: {DATA_ROOT}", style={"color": "#888", "fontSize": "1em", "textAlign": "center"}),
 
         # ── Controls row ───────────────────────────────────────────────
         html.Div(
             style={"display": "flex", "gap": "20px", "flexWrap": "wrap", "alignItems": "flex-end"},
             children=[
                 html.Div([
-                    html.Label("Sample", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px"}),
+                    html.Label("Sequence", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px"}),
                     dcc.Dropdown(
-                        id="sample-dropdown",
-                        options=[{"label": s, "value": s} for s in SAMPLE_NAMES],
-                        value=SAMPLE_NAMES[0] if SAMPLE_NAMES else None,
-                        style={"width": "340px"},
+                        id="sequence-dropdown",
+                        options=[{"label": s, "value": s} for s in INITIAL_SEQUENCES],
+                        value=INITIAL_SEQUENCES[0] if INITIAL_SEQUENCES else None,
+                        style={"width": "480px"},
                     ),
+                ]),
+                html.Div([
+                    html.Label("Sample", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px"}),
+                    dcc.Dropdown(id="sample-dropdown", style={"width": "340px"}),
                 ]),
                 html.Div([
                     html.Label("Wavelength", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px"}),
                     dcc.Dropdown(
                         id="wavelength-dropdown",
                         options=[{"label": w, "value": w} for w in ALL_WAVELENGTHS],
-                        value="280 nm" if "280 nm" in ALL_WAVELENGTHS else (ALL_WAVELENGTHS[0] if ALL_WAVELENGTHS else None),
+                        value="280 nm",
                         style={"width": "180px"},
+                    ),
+                ]),
+                html.Div(style={"marginBottom": "4px"}, children=[
+                    html.Button(
+                        "Refresh sequences",
+                        id="refresh-btn",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": "#222",
+                            "color": "#CCC",
+                            "border": "1px solid #444",
+                            "padding": "10px 18px",
+                            "cursor": "pointer",
+                            "fontSize": "0.95em",
+                            "borderRadius": "4px",
+                        },
                     ),
                 ]),
             ],
@@ -364,6 +410,31 @@ app.layout = html.Div(
 # ── Callbacks ───────────────────────────────────────────────────────────────
 
 @callback(
+    Output("sequence-dropdown", "options"),
+    Input("refresh-btn", "n_clicks"),
+)
+def refresh_sequences(_n):
+    """Re-scan DATA_ROOT for sequence folders (also runs on initial load)."""
+    seqs = list_sequences(DATA_ROOT)
+    return [{"label": s, "value": s} for s in seqs]
+
+
+@callback(
+    Output("sample-dropdown", "options"),
+    Output("sample-dropdown", "value"),
+    Input("sequence-dropdown", "value"),
+)
+def update_samples(sequence):
+    """Populate sample dropdown when a sequence is selected."""
+    if not sequence:
+        return [], None
+    samples = list_samples(DATA_ROOT, sequence)
+    options = [{"label": s, "value": s} for s in samples]
+    default = samples[0] if samples else None
+    return options, default
+
+
+@callback(
     Output("prominence-label", "children"),
     Output("width-label", "children"),
     Output("height-label", "children"),
@@ -379,25 +450,20 @@ def update_slider_labels(prom, wid, hgt):
     )
 
 
-N_COLOR_LEVELS = 20  # quantisation levels for the gradient line
+N_COLOR_LEVELS = 20
 
 
 def _build_gradient_traces(time, response, glow, base_hex, peak_hex, wavelength):
-    """
-    Split the chromatogram into segments coloured by glow level.
-    Returns a list of go.Scatter traces (first one gets the legend entry).
-    """
+    """Split the chromatogram into segments coloured by glow level."""
     levels = np.clip((glow * N_COLOR_LEVELS).astype(int), 0, N_COLOR_LEVELS)
     traces = []
     i = 0
     first = True
     while i < len(time) - 1:
         lvl = levels[i]
-        # collect consecutive points at same level
         j = i + 1
         while j < len(time) and levels[j] == lvl:
             j += 1
-        # include one extra point for continuity with next segment
         end = min(j + 1, len(time))
         color = rgb_lerp(base_hex, peak_hex, lvl / N_COLOR_LEVELS)
         traces.append(go.Scatter(
@@ -418,21 +484,43 @@ def _build_gradient_traces(time, response, glow, base_hex, peak_hex, wavelength)
 @callback(
     Output("chromatogram", "figure"),
     Output("peak-table", "data"),
+    Input("sequence-dropdown", "value"),
     Input("sample-dropdown", "value"),
     Input("wavelength-dropdown", "value"),
     Input("prominence-slider", "value"),
     Input("width-slider", "value"),
     Input("height-slider", "value"),
 )
-def update_plot(sample, wavelength, prominence, min_width, min_height):
+def update_plot(sequence, sample, wavelength, prominence, min_width, min_height):
     fig = go.Figure()
     table_data = []
 
-    if not sample or not wavelength or wavelength not in DATA.get(sample, {}):
-        fig.update_layout(title="No data selected")
+    # Apply dark layout even when no data
+    dark_layout = dict(
+        hovermode="closest",
+        template="plotly_dark",
+        paper_bgcolor="#000000",
+        plot_bgcolor="#000000",
+        font={"family": "Arial, sans-serif", "color": "#CCCCCC", "size": 16},
+        margin={"t": 60, "b": 60, "l": 70, "r": 30},
+        height=650,
+        hoverlabel={"font_size": 16},
+        xaxis={"gridcolor": "#222", "zerolinecolor": "#333", "title_font_size": 18, "tickfont_size": 15},
+        yaxis={"gridcolor": "#222", "zerolinecolor": "#333", "title_font_size": 18, "tickfont_size": 15},
+        legend={"font_size": 16},
+    )
+
+    if not sequence or not sample or not wavelength:
+        fig.update_layout(title="Select a sequence, sample, and wavelength", **dark_layout)
         return fig, table_data
 
-    df = DATA[sample][wavelength]
+    # Load data on demand
+    sample_data = load_sample(DATA_ROOT, sequence, sample)
+    if wavelength not in sample_data:
+        fig.update_layout(title=f"No {wavelength} data for {sample}", **dark_layout)
+        return fig, table_data
+
+    df = sample_data[wavelength]
     time = df["time"].values
     response = df["response"].values
 
@@ -448,17 +536,14 @@ def update_plot(sample, wavelength, prominence, min_width, min_height):
     for tr in _build_gradient_traces(time, response, glow, base_hex, peak_hex, wavelength):
         fig.add_trace(tr)
 
-    # Shaded peak areas — each gets a dim and bright color for hover effect
+    # Shaded peak areas
     fill_r, fill_g, fill_b = hex_to_rgb(peak_hex)
     fill_dim = f"rgba({fill_r},{fill_g},{fill_b},0.12)"
     fill_bright = f"rgba({fill_r},{fill_g},{fill_b},0.38)"
-    peak_fill_indices = []  # track which trace indices are peak fills
     for p in peaks:
         li, ri = p["left_idx"], p["right_idx"] + 1
         seg_t = time[li:ri]
         seg_r = response[li:ri]
-        trace_idx = len(fig.data)
-        peak_fill_indices.append(trace_idx)
         hover_txt = (
             f"RT: {p['rt']} min<br>"
             f"Area: {p['area']} mAu·min<br>"
@@ -505,20 +590,9 @@ def update_plot(sample, wavelength, prominence, min_width, min_height):
         title={"text": f"{sample} — {wavelength}", "font": {"color": "#FFFFFF", "size": 22}},
         xaxis_title="Retention Time (min)",
         yaxis_title="Response (mAu)",
-        hovermode="closest",
-        template="plotly_dark",
-        paper_bgcolor="#000000",
-        plot_bgcolor="#000000",
-        font={"family": "Arial, sans-serif", "color": "#CCCCCC", "size": 16},
-        margin={"t": 60, "b": 60, "l": 70, "r": 30},
-        height=650,
-        hoverlabel={"font_size": 16},
-        xaxis={"gridcolor": "#222", "zerolinecolor": "#333", "title_font_size": 18, "tickfont_size": 15},
-        yaxis={"gridcolor": "#222", "zerolinecolor": "#333", "title_font_size": 18, "tickfont_size": 15},
-        legend={"font_size": 16},
+        **dark_layout,
     )
 
-    # Build table rows
     for i, p in enumerate(peaks):
         table_data.append({
             "num": i + 1,
@@ -566,8 +640,7 @@ app.clientside_callback(
 # ── Run ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"Loaded {len(SAMPLE_NAMES)} samples from {rslt_dir}")
-    for s in SAMPLE_NAMES:
-        wls = ", ".join(sorted(DATA[s].keys()))
-        print(f"  {s}: {wls}")
-    app.run(debug=True, host="0.0.0.0")
+    seqs = list_sequences(DATA_ROOT)
+    print(f"Data root: {DATA_ROOT}")
+    print(f"Found {len(seqs)} sequence(s): {', '.join(seqs) if seqs else '(none)'}")
+    app.run(debug=False, host="0.0.0.0", port=8050)

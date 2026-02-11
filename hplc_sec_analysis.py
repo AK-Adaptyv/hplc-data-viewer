@@ -17,10 +17,10 @@ import glob
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, peak_widths
-from dash import Dash, dcc, html, dash_table, Input, Output, callback
+from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
 import plotly.graph_objects as go
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 # ── Color configuration ────────────────────────────────────────────────────
 
@@ -390,7 +390,27 @@ app.layout = html.Div(
         dcc.Graph(id="chromatogram", style={"marginTop": "20px"}),
 
         # ── Peak table ─────────────────────────────────────────────────
-        html.H4("Detected Peaks", style={"marginTop": "16px", "color": "#FFFFFF", "fontSize": "1.4em"}),
+        html.Div(
+            style={"display": "flex", "alignItems": "center", "gap": "20px", "marginTop": "16px"},
+            children=[
+                html.H4("Detected Peaks", style={"margin": "0", "color": "#FFFFFF", "fontSize": "1.4em"}),
+                html.Button(
+                    "Export all wavelengths (CSV)",
+                    id="export-btn",
+                    n_clicks=0,
+                    style={
+                        "backgroundColor": "#222",
+                        "color": "#CCC",
+                        "border": "1px solid #444",
+                        "padding": "8px 18px",
+                        "cursor": "pointer",
+                        "fontSize": "0.9em",
+                        "borderRadius": "4px",
+                    },
+                ),
+                dcc.Download(id="download-csv"),
+            ],
+        ),
         dash_table.DataTable(
             id="peak-table",
             columns=[
@@ -618,6 +638,52 @@ def update_plot(sequence, sample, wavelength, prominence, min_width, min_height)
         })
 
     return fig, table_data
+
+
+# ── Export callback ─────────────────────────────────────────────────────────
+
+@callback(
+    Output("download-csv", "data"),
+    Input("export-btn", "n_clicks"),
+    State("sequence-dropdown", "value"),
+    State("sample-dropdown", "value"),
+    State("prominence-slider", "value"),
+    State("width-slider", "value"),
+    State("height-slider", "value"),
+    prevent_initial_call=True,
+)
+def export_csv(n_clicks, sequence, sample, prominence, min_width, min_height):
+    """Export detected peaks for all three wavelengths as a single CSV."""
+    if not sequence or not sample:
+        return None
+
+    sample_data = load_sample(DATA_ROOT, sequence, sample)
+    rows = []
+    for wl in ALL_WAVELENGTHS:
+        if wl not in sample_data:
+            continue
+        peaks = detect_peaks(sample_data[wl], prominence, min_width, min_height)
+        for i, p in enumerate(peaks):
+            rows.append({
+                "Wavelength": wl,
+                "Peak #": i + 1,
+                "RT (min)": p["rt"],
+                "Height (mAu)": p["height"],
+                "Area (mAu·min)": p["area"],
+                "Area %": p["area_pct"],
+                "Est. MW (kDa)": p["mw_kda"],
+            })
+
+    if not rows:
+        rows.append({
+            "Wavelength": "", "Peak #": "", "RT (min)": "",
+            "Height (mAu)": "", "Area (mAu·min)": "",
+            "Area %": "", "Est. MW (kDa)": "No peaks detected",
+        })
+
+    df = pd.DataFrame(rows)
+    filename = f"{sample}_peaks.csv"
+    return dcc.send_data_frame(df.to_csv, filename, index=False)
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────

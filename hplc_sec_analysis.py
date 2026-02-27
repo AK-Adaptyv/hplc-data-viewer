@@ -20,7 +20,7 @@ from scipy.signal import find_peaks, peak_widths
 from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
 import plotly.graph_objects as go
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 # ── Color configuration ────────────────────────────────────────────────────
 
@@ -31,6 +31,18 @@ WAVELENGTH_COLORS = {
 }
 
 ALL_WAVELENGTHS = ["220 nm", "280 nm", "395 nm"]
+
+# Color palette for overlay mode (cycling through multiple samples)
+OVERLAY_PALETTE = [
+    {"base": "#FF6B6B", "peak": "#FF1744"},  # Red
+    {"base": "#4ECDC4", "peak": "#00E5FF"},  # Teal
+    {"base": "#45B7D1", "peak": "#00B4D8"},  # Blue
+    {"base": "#96CEB4", "peak": "#52B788"},  # Green
+    {"base": "#FFEAA7", "peak": "#FFD60A"},  # Yellow
+    {"base": "#DDA0DD", "peak": "#FF69B4"},  # Pink/Magenta
+    {"base": "#A29BFE", "peak": "#6C5CE7"},  # Purple
+    {"base": "#74B9FF", "peak": "#0984E3"},  # Light Blue
+]
 
 
 def hex_to_rgb(h):
@@ -322,7 +334,7 @@ app.layout = html.Div(
                 ]),
                 html.Div([
                     html.Label("Sample", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px"}),
-                    dcc.Dropdown(id="sample-dropdown", style={"width": "340px"}),
+                    dcc.Dropdown(id="sample-dropdown", style={"width": "340px"}, multi=False),
                 ]),
                 html.Div([
                     html.Label("Wavelength", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px"}),
@@ -331,6 +343,14 @@ app.layout = html.Div(
                         options=[{"label": w, "value": w} for w in ALL_WAVELENGTHS],
                         value="280 nm",
                         style={"width": "180px"},
+                    ),
+                ]),
+                html.Div(style={"marginBottom": "4px"}, children=[
+                    dcc.Checklist(
+                        id="overlay-toggle",
+                        options=[{"label": " Overlay mode", "value": True}],
+                        value=[],
+                        style={"color": "#CCC", "fontSize": "0.95em"},
                     ),
                 ]),
                 html.Div(style={"marginBottom": "4px"}, children=[
@@ -391,7 +411,7 @@ app.layout = html.Div(
 
         # ── Peak table ─────────────────────────────────────────────────
         html.Div(
-            style={"display": "flex", "alignItems": "center", "gap": "20px", "marginTop": "16px"},
+            style={"display": "flex", "alignItems": "center", "gap": "20px", "marginTop": "16px", "flexWrap": "wrap"},
             children=[
                 html.H4("Detected Peaks", style={"margin": "0", "color": "#FFFFFF", "fontSize": "1.4em"}),
                 html.Button(
@@ -408,7 +428,22 @@ app.layout = html.Div(
                         "borderRadius": "4px",
                     },
                 ),
+                html.Button(
+                    "Export sequence peaks (CSV)",
+                    id="export-sequence-btn",
+                    n_clicks=0,
+                    style={
+                        "backgroundColor": "#222",
+                        "color": "#CCC",
+                        "border": "1px solid #444",
+                        "padding": "8px 18px",
+                        "cursor": "pointer",
+                        "fontSize": "0.9em",
+                        "borderRadius": "4px",
+                    },
+                ),
                 dcc.Download(id="download-csv"),
+                dcc.Download(id="download-csv-bulk"),
             ],
         ),
         dash_table.DataTable(
@@ -458,16 +493,24 @@ def refresh_sequences(_n):
 @callback(
     Output("sample-dropdown", "options"),
     Output("sample-dropdown", "value"),
+    Output("sample-dropdown", "multi"),
     Input("sequence-dropdown", "value"),
+    Input("overlay-toggle", "value"),
 )
-def update_samples(sequence):
-    """Populate sample dropdown when a sequence is selected."""
+def update_samples(sequence, overlay_mode):
+    """Populate sample dropdown when a sequence is selected. Enable multi-select in overlay mode."""
     if not sequence:
-        return [], None
+        return [], None, False
     samples = list_samples(DATA_ROOT, sequence)
     options = [{"label": s, "value": s} for s in samples]
-    default = samples[0] if samples else None
-    return options, default
+    # If overlay mode is on, enable multi-select and select all samples by default
+    is_overlay = bool(overlay_mode)
+    if is_overlay:
+        default = samples  # Select all samples in overlay mode
+        return options, default, True
+    else:
+        default = samples[0] if samples else None
+        return options, default, False
 
 
 @callback(
@@ -523,13 +566,15 @@ def _build_gradient_traces(time, response, glow, base_hex, peak_hex, wavelength)
     Input("sequence-dropdown", "value"),
     Input("sample-dropdown", "value"),
     Input("wavelength-dropdown", "value"),
+    Input("overlay-toggle", "value"),
     Input("prominence-slider", "value"),
     Input("width-slider", "value"),
     Input("height-slider", "value"),
 )
-def update_plot(sequence, sample, wavelength, prominence, min_width, min_height):
+def update_plot(sequence, sample, wavelength, overlay_toggle, prominence, min_width, min_height):
     fig = go.Figure()
     table_data = []
+    is_overlay = bool(overlay_toggle)
 
     # Apply dark layout even when no data
     dark_layout = dict(
@@ -546,8 +591,111 @@ def update_plot(sequence, sample, wavelength, prominence, min_width, min_height)
         legend={"font_size": 16},
     )
 
-    if not sequence or not sample or not wavelength:
-        fig.update_layout(title="Select a sequence, sample, and wavelength", **dark_layout)
+    if not sequence or not wavelength:
+        fig.update_layout(title="Select a sequence and wavelength", **dark_layout)
+        return fig, table_data
+
+    # ── Overlay Mode ─────────────────────────────────────────────
+    if is_overlay:
+        # sample is now a list of selected samples in overlay mode
+        selected_samples = sample if isinstance(sample, list) else [sample] if sample else []
+        if not selected_samples:
+            fig.update_layout(title="Select samples to overlay", **dark_layout)
+            return fig, table_data
+
+        for sample_idx, samp in enumerate(selected_samples):
+            # Get color from palette
+            color_pair = OVERLAY_PALETTE[sample_idx % len(OVERLAY_PALETTE)]
+            base_hex = color_pair["base"]
+            peak_hex = color_pair["peak"]
+
+            # Load sample data
+            sample_data = load_sample(DATA_ROOT, sequence, samp)
+            if wavelength not in sample_data:
+                continue
+
+            df = sample_data[wavelength]
+            time = df["time"].values
+            response = df["response"].values
+
+            # Detect peaks
+            peaks = detect_peaks(df, prominence=prominence, min_width=min_width, min_height=min_height)
+
+            # Gradient chromatogram line
+            glow = compute_glow(time, peaks) if peaks else np.zeros(len(time))
+            for tr in _build_gradient_traces(time, response, glow, base_hex, peak_hex, samp):
+                fig.add_trace(tr)
+
+            # Shaded peak areas (lighter in overlay mode)
+            fill_r, fill_g, fill_b = hex_to_rgb(peak_hex)
+            fill_color = f"rgba({fill_r},{fill_g},{fill_b},0.1)"
+            for p in peaks:
+                li, ri = p["left_idx"], p["right_idx"] + 1
+                seg_t = time[li:ri]
+                seg_r = response[li:ri]
+                hover_txt = (
+                    f"{samp}<br>"
+                    f"RT: {p['rt']} min<br>"
+                    f"Area: {p['area']} mAu·min<br>"
+                    f"Area%: {p['area_pct']}%<br>"
+                    f"MW: {p['mw_kda']} kDa"
+                )
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([seg_t, seg_t[::-1]]),
+                    y=np.concatenate([seg_r, np.zeros(len(seg_r))]),
+                    fill="toself",
+                    fillcolor=fill_color,
+                    line={"width": 0},
+                    showlegend=False,
+                    hoverinfo="text",
+                    hovertext=hover_txt,
+                ))
+
+            # Peak markers
+            if peaks:
+                marker_x = [p["rt"] for p in peaks]
+                marker_y = [p["height"] for p in peaks]
+                hover_texts = [
+                    f"{samp}<br>"
+                    f"RT: {p['rt']} min<br>"
+                    f"Area: {p['area']} mAu·min<br>"
+                    f"Area%: {p['area_pct']}%<br>"
+                    f"MW: {p['mw_kda']} kDa"
+                    for p in peaks
+                ]
+                fig.add_trace(go.Scatter(
+                    x=marker_x, y=marker_y,
+                    mode="markers",
+                    marker={"size": 8, "color": peak_hex, "symbol": "diamond",
+                             "line": {"width": 1, "color": "#FFFFFF"}},
+                    name=samp,
+                    hovertext=hover_texts,
+                    hoverinfo="text",
+                    legendgroup="samples",
+                ))
+
+            # Add to peak table
+            for i, p in enumerate(peaks):
+                table_data.append({
+                    "num": f"{samp} - {i + 1}",
+                    "rt": p["rt"],
+                    "height": p["height"],
+                    "area": p["area"],
+                    "area_pct": p["area_pct"],
+                    "mw_kda": p["mw_kda"],
+                })
+
+        fig.update_layout(
+            title={"text": f"Overlay: {sequence} — {wavelength} ({len(selected_samples)} samples)", "font": {"color": "#FFFFFF", "size": 22}},
+            xaxis_title="Retention Time (min)",
+            yaxis_title="Response (mAu)",
+            **dark_layout,
+        )
+        return fig, table_data
+
+    # ── Single Mode ──────────────────────────────────────────────
+    if not sample:
+        fig.update_layout(title="Select a sample", **dark_layout)
         return fig, table_data
 
     # Load data on demand
@@ -683,6 +831,57 @@ def export_csv(n_clicks, sequence, sample, prominence, min_width, min_height):
 
     df = pd.DataFrame(rows)
     filename = f"{sample}_peaks.csv"
+    return dcc.send_data_frame(df.to_csv, filename, index=False)
+
+
+# ── Bulk export callback ─────────────────────────────────────────────────────
+
+@callback(
+    Output("download-csv-bulk", "data"),
+    Input("export-sequence-btn", "n_clicks"),
+    State("sequence-dropdown", "value"),
+    State("prominence-slider", "value"),
+    State("width-slider", "value"),
+    State("height-slider", "value"),
+    prevent_initial_call=True,
+)
+def export_csv_bulk(n_clicks, sequence, prominence, min_width, min_height):
+    """Export detected peaks for all samples in a sequence as a single CSV."""
+    if not sequence:
+        return None
+
+    samples = list_samples(DATA_ROOT, sequence)
+    rows = []
+
+    for sample in samples:
+        sample_data = load_sample(DATA_ROOT, sequence, sample)
+        for wl in ALL_WAVELENGTHS:
+            if wl not in sample_data:
+                continue
+            peaks = detect_peaks(sample_data[wl], prominence, min_width, min_height)
+            for i, p in enumerate(peaks):
+                rows.append({
+                    "Sample": sample,
+                    "Wavelength": wl,
+                    "Peak #": i + 1,
+                    "RT (min)": p["rt"],
+                    "Height (mAu)": p["height"],
+                    "Area (mAu·min)": p["area"],
+                    "Area %": p["area_pct"],
+                    "Est. MW (kDa)": p["mw_kda"],
+                })
+
+    if not rows:
+        rows.append({
+            "Sample": "", "Wavelength": "", "Peak #": "", "RT (min)": "",
+            "Height (mAu)": "", "Area (mAu·min)": "",
+            "Area %": "", "Est. MW (kDa)": "No peaks detected",
+        })
+
+    df = pd.DataFrame(rows)
+    # Clean up sequence name for filename (remove special chars)
+    safe_seq_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in sequence)
+    filename = f"{safe_seq_name}_all_samples_peaks.csv"
     return dcc.send_data_frame(df.to_csv, filename, index=False)
 
 

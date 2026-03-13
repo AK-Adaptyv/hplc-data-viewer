@@ -17,7 +17,7 @@ import glob
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, peak_widths
-from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
+from dash import Dash, dcc, html, dash_table, Input, Output, State, callback, no_update
 import plotly.graph_objects as go
 
 VERSION = "0.5.0"
@@ -319,6 +319,25 @@ app.layout = html.Div(
         html.H2("HPLC-SEC Chromatogram Analysis", className="gradient-title"),
         html.P(f"Data root: {DATA_ROOT}", style={"color": "#888", "fontSize": "1em", "textAlign": "center"}),
 
+        dcc.Store(id="pending-sample", data=None),
+
+        # ── Global sample search ────────────────────────────────────────
+        html.Div(
+            style={"marginBottom": "20px"},
+            children=[
+                html.Label("Search sample", style={"color": "#CCC", "fontSize": "1.15em", "marginBottom": "6px", "display": "block"}),
+                dcc.Dropdown(
+                    id="global-search",
+                    options=[],
+                    value=None,
+                    placeholder="Search sample name across all sequences…",
+                    searchable=True,
+                    clearable=True,
+                    style={"width": "100%"},
+                ),
+            ],
+        ),
+
         # ── Controls row ───────────────────────────────────────────────
         html.Div(
             style={"display": "flex", "gap": "20px", "flexWrap": "wrap", "alignItems": "flex-end"},
@@ -482,12 +501,33 @@ app.layout = html.Div(
 
 @callback(
     Output("sequence-dropdown", "options"),
+    Output("global-search", "options"),
     Input("refresh-btn", "n_clicks"),
 )
 def refresh_sequences(_n):
-    """Re-scan DATA_ROOT for sequence folders (also runs on initial load)."""
+    """Re-scan DATA_ROOT for sequence folders and rebuild search index."""
     seqs = list_sequences(DATA_ROOT)
-    return [{"label": s, "value": s} for s in seqs]
+    seq_options = [{"label": s, "value": s} for s in seqs]
+    search_options = [
+        {"label": f"{seq}  /  {sample}", "value": f"{seq}||{sample}"}
+        for seq in seqs
+        for sample in list_samples(DATA_ROOT, seq)
+    ]
+    return seq_options, search_options
+
+
+@callback(
+    Output("sequence-dropdown", "value"),
+    Output("pending-sample", "data"),
+    Input("global-search", "value"),
+    prevent_initial_call=True,
+)
+def handle_search_selection(search_value):
+    """Navigate to the sequence/sample chosen in the global search bar."""
+    if not search_value:
+        return no_update, None
+    seq, sample = search_value.split("||", 1)
+    return seq, sample
 
 
 @callback(
@@ -496,20 +536,23 @@ def refresh_sequences(_n):
     Output("sample-dropdown", "multi"),
     Input("sequence-dropdown", "value"),
     Input("overlay-toggle", "value"),
+    State("pending-sample", "data"),
 )
-def update_samples(sequence, overlay_mode):
+def update_samples(sequence, overlay_mode, pending_sample):
     """Populate sample dropdown when a sequence is selected. Enable multi-select in overlay mode."""
     if not sequence:
         return [], None, False
     samples = list_samples(DATA_ROOT, sequence)
     options = [{"label": s, "value": s} for s in samples]
-    # If overlay mode is on, enable multi-select and select all samples by default
     is_overlay = bool(overlay_mode)
     if is_overlay:
-        default = samples  # Select all samples in overlay mode
-        return options, default, True
+        return options, samples, True
     else:
-        default = samples[0] if samples else None
+        # Use search-navigation hint if it matches a sample in this sequence
+        if pending_sample and pending_sample in samples:
+            default = pending_sample
+        else:
+            default = samples[0] if samples else None
         return options, default, False
 
 

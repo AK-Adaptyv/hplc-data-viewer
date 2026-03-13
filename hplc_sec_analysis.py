@@ -367,7 +367,15 @@ app.layout = html.Div(
                 html.Div(style={"marginBottom": "4px"}, children=[
                     dcc.Checklist(
                         id="overlay-toggle",
-                        options=[{"label": " Overlay mode", "value": True}],
+                        options=[{"label": " Overlay samples", "value": True}],
+                        value=[],
+                        style={"color": "#CCC", "fontSize": "0.95em"},
+                    ),
+                ]),
+                html.Div(style={"marginBottom": "4px"}, children=[
+                    dcc.Checklist(
+                        id="wavelength-overlay-toggle",
+                        options=[{"label": " Overlay wavelengths", "value": True}],
                         value=[],
                         style={"color": "#CCC", "fontSize": "0.95em"},
                     ),
@@ -610,14 +618,16 @@ def _build_gradient_traces(time, response, glow, base_hex, peak_hex, wavelength)
     Input("sample-dropdown", "value"),
     Input("wavelength-dropdown", "value"),
     Input("overlay-toggle", "value"),
+    Input("wavelength-overlay-toggle", "value"),
     Input("prominence-slider", "value"),
     Input("width-slider", "value"),
     Input("height-slider", "value"),
 )
-def update_plot(sequence, sample, wavelength, overlay_toggle, prominence, min_width, min_height):
+def update_plot(sequence, sample, wavelength, overlay_toggle, wavelength_overlay_toggle, prominence, min_width, min_height):
     fig = go.Figure()
     table_data = []
     is_overlay = bool(overlay_toggle)
+    is_wl_overlay = bool(wavelength_overlay_toggle)
 
     # Apply dark layout even when no data
     dark_layout = dict(
@@ -634,8 +644,101 @@ def update_plot(sequence, sample, wavelength, overlay_toggle, prominence, min_wi
         legend={"font_size": 16},
     )
 
-    if not sequence or not wavelength:
-        fig.update_layout(title="Select a sequence and wavelength", **dark_layout)
+    if not sequence:
+        fig.update_layout(title="Select a sequence", **dark_layout)
+        return fig, table_data
+
+    # ── Wavelength Overlay Mode ───────────────────────────────────
+    if is_wl_overlay and not is_overlay:
+        single_sample = sample if isinstance(sample, str) else (sample[0] if sample else None)
+        if not single_sample:
+            fig.update_layout(title="Select a sample", **dark_layout)
+            return fig, table_data
+
+        sample_data = load_sample(DATA_ROOT, sequence, single_sample)
+
+        for wl in ALL_WAVELENGTHS:
+            if wl not in sample_data:
+                continue
+            colors = WAVELENGTH_COLORS[wl]
+            base_hex = colors["base"]
+            peak_hex = colors["peak"]
+
+            df = sample_data[wl]
+            time = df["time"].values
+            response = df["response"].values
+
+            peaks = detect_peaks(df, prominence=prominence, min_width=min_width, min_height=min_height)
+            glow = compute_glow(time, peaks) if peaks else np.zeros(len(time))
+            for tr in _build_gradient_traces(time, response, glow, base_hex, peak_hex, wl):
+                fig.add_trace(tr)
+
+            fill_r, fill_g, fill_b = hex_to_rgb(peak_hex)
+            fill_color = f"rgba({fill_r},{fill_g},{fill_b},0.1)"
+            for p in peaks:
+                li, ri = p["left_idx"], p["right_idx"] + 1
+                seg_t = time[li:ri]
+                seg_r = response[li:ri]
+                hover_txt = (
+                    f"{wl}<br>"
+                    f"RT: {p['rt']} min<br>"
+                    f"Area: {p['area']} mAu·min<br>"
+                    f"Area%: {p['area_pct']}%<br>"
+                    f"MW: {p['mw_kda']} kDa"
+                )
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([seg_t, seg_t[::-1]]),
+                    y=np.concatenate([seg_r, np.zeros(len(seg_r))]),
+                    fill="toself",
+                    fillcolor=fill_color,
+                    line={"width": 0},
+                    showlegend=False,
+                    hoverinfo="text",
+                    hovertext=hover_txt,
+                ))
+
+            if peaks:
+                marker_x = [p["rt"] for p in peaks]
+                marker_y = [p["height"] for p in peaks]
+                hover_texts = [
+                    f"{wl}<br>"
+                    f"RT: {p['rt']} min<br>"
+                    f"Area: {p['area']} mAu·min<br>"
+                    f"Area%: {p['area_pct']}%<br>"
+                    f"MW: {p['mw_kda']} kDa"
+                    for p in peaks
+                ]
+                fig.add_trace(go.Scatter(
+                    x=marker_x, y=marker_y,
+                    mode="markers",
+                    marker={"size": 8, "color": peak_hex, "symbol": "diamond",
+                             "line": {"width": 1, "color": "#FFFFFF"}},
+                    name=wl,
+                    hovertext=hover_texts,
+                    hoverinfo="text",
+                    legendgroup="wavelengths",
+                ))
+
+            for i, p in enumerate(peaks):
+                table_data.append({
+                    "num": f"{wl} — {i + 1}",
+                    "rt": p["rt"],
+                    "height": p["height"],
+                    "area": p["area"],
+                    "area_pct": p["area_pct"],
+                    "mw_kda": p["mw_kda"],
+                })
+
+        fig.update_layout(
+            title={"text": f"{single_sample} — all wavelengths", "font": {"color": "#FFFFFF", "size": 22}},
+            xaxis_title="Retention Time (min)",
+            yaxis_title="Response (mAu)",
+            **dark_layout,
+        )
+        return fig, table_data
+
+    if not wavelength:
+        fig.update_layout(title="Select a wavelength", **dark_layout)
         return fig, table_data
 
     # ── Overlay Mode ─────────────────────────────────────────────
